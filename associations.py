@@ -9,13 +9,14 @@ from shapely.geometry import Point, LineString
 from shapely.wkt import loads
 
 
-centerlines_file = 'centerline_shape'
-fleetpoints_file = 'test_fleet'
-outfile = '3_20_18'
+centerlines_file = 'centerline_shape_2272'
+fleetpoints_file = 'originals_feet'
+outfile = '3_29_18'
 cwd = os.path.dirname(__file__)
 
 centerline_list = []
 fleetpoint_list = []
+associations_list = []
 
 
 class CENTERLINE:
@@ -77,11 +78,6 @@ def read_fleetpoints(): # create a list of gps point objects from the csv file
     return
 
 
-read_fleetpoints()
-read_centerlines()
-print('Finished reading input files')
-
-
 def extract_centerline_points(): # maps each point that is a endpoint for a centerline segment to every centerline segment it is an endpoint for, and returns a list of all the points
     points = []
     for centerline in centerline_list:
@@ -93,130 +89,93 @@ def extract_centerline_points(): # maps each point that is a endpoint for a cent
     return list(set(points))
 
 
-centerline_endpoints_map = defaultdict(list)
-centerline_endpoints_list = extract_centerline_points()
-tree = spatial.KDTree(centerline_endpoints_list)
+def near(fleetptx, fleetpty, segx1, segy1, segx2, segy2):
 
-
-def perpendicular(px, py, sx1, sy1, sx2, sy2): # returns the closest point on the input line to the input point
-    segSlope = (sy2-sy1)/(sx2-sx1)
-    segB = sy2 - segSlope*sx2
-    pSlope = -1/segSlope
-    pB = py - pSlope*px
-    assocx = (segB-pB)/(pSlope-segSlope)
-    assocy = pSlope*assocx + pB
-    return assocx, assocy
-
-
-associations_list = []
+    # if a perpendicular can be drawn within the end vertices of the line segment:
+    if (segx1 < fleetptx < segx2) | (segx2 < fleetptx < segx1) | (segy1 < fleetpty < segy2) | (segy2 < fleetpty < segy1):
+        if (segx2 == segx1):
+            segSlope = (segy2 - segy1) / 0.1
+        else:
+            segSlope = (segy2 - segy1) / (segx2 - segx1)
+        segB = segy2 - segSlope * segx2
+        perpendicularSlope = -1 / segSlope
+        pB = fleetpty - perpendicularSlope * fleetptx
+        assocx = (segB - pB) / (perpendicularSlope - segSlope)
+        assocy = perpendicularSlope * assocx + pB
+    else:
+        if sqrt(pow(fleetptx - segx1, 2) + pow(fleetpty - segy1, 2)) < sqrt(pow(fleetptx - segx2, 2) + pow(fleetpty - segy2, 2)):
+            assocx = segx1
+            assocy = segy1
+        else:
+            assocx = segx2
+            assocy = segy2
+    dist = sqrt(pow(fleetptx - assocx, 2) + pow(fleetpty - assocy, 2))
+    return assocx, assocy, dist
 
 
 def associate():
-    path = csv_path(outfile)
-    f = open(path, 'w+')
-    header = 'id,runid,runid_sequence,vin,datetime,lon,lat,assoc_lon,assoc_lat\n'
-    f.write(header)
-
-    associations_list.append([fleetpoint_list[0].lon, fleetpoint_list[0].lat]) # hard-coded first point, needs to be fixed
-    j = 1
+    j = 0
     while j < len(fleetpoint_list):
-        previous_lon = associations_list[j-1][0]
-        previous_lat = associations_list[j - 1][1]
-        print([previous_lon, previous_lat])
-        print([fleetpoint_list[j].lon, fleetpoint_list[j].lat])
-        closest_centerline_coords = tree.query([fleetpoint_list[j].lon, fleetpoint_list[j].lat], 4)[1]  # query the tree for the 4 closest points to the gps point, returns their index in centerline_points
-        centerlines = set()  # keep track of the segments we have already considered for this particular point
-        shortestDist = 100
+        fleetptx = fleetpoint_list[j].lon
+        fleetpty = fleetpoint_list[j].lat
+        print([fleetptx, fleetpty])
+        closest_centerline_coords = tree.query([fleetptx, fleetpty], 4)[1]  # query the tree for the 4 closest points to the gps point, returns their index in centerline_points
+        checked_centerlines = set()  # keep track of the segments we have already considered for this particular point
+        shortestDist = sys.float_info.max
         shortestDist_seg = 0
-        shortestDist_nonSlope = 100
-        shortestDist_seg_nonSlope = 0
         assocx = 0
         assocy = 0
-        if previous_lon == fleetpoint_list[j].lon: # either if the location has not changed at all or if the slope is vertical
-            slope_from_prev = 100
-        else:
-            slope_from_prev = abs((previous_lat-fleetpoint_list[j].lat)/(previous_lon-fleetpoint_list[j].lon))
-        dist_from_prev = sqrt(pow(previous_lat-fleetpoint_list[j].lat, 2) + pow(previous_lon-fleetpoint_list[j].lon, 2))
+
         k = 0 #useful in print statements for keeping track of the coordinates we are checking
         for coord in closest_centerline_coords:
             print('new candidate coordinate')
-            segs = centerline_endpoints_map[centerline_endpoints_list[coord]]  # find the list of LineStrings that each coordinate is mapped to
-            for seg in segs:
+            linestrings = centerline_endpoints_map[centerline_endpoints_list[coord]]  # find the list of LineStrings that each coordinate is mapped to
+            for linestring in linestrings:
                 print(k)
                 print('current centerline:')
-                print(seg)
-                if str(seg) not in centerlines:
-                    # print('considering new segment')
-                    centerlines.add(str(seg))
+                print(linestring)
+                if str(linestring) not in checked_centerlines:
+                    print('this centerline has not been checked yet')
+                    checked_centerlines.add(str(linestring))
                     l = 0
-                    seg_coords = list(seg.coords)
-                    px = fleetpoint_list[j].lon
-                    py = fleetpoint_list[j].lat
-                    while l < len(seg_coords)-1: # consider each line that is a part of the current centerline LineString
-                        sx1 = seg_coords[l][0]
-                        sy1 = seg_coords[l][1]
-                        sx2 = seg_coords[l+1][0]
-                        sy2 = seg_coords[l+1][1]
+                    centerline_coords = list(linestring.coords)
+                    while l < len(centerline_coords)-1: # consider each line that is a part of the current centerline LineString
+                        segx1 = centerline_coords[l][0]
+                        segy1 = centerline_coords[l][1]
+                        segx2 = centerline_coords[l+1][0]
+                        segy2 = centerline_coords[l+1][1]
                         print('Segment:')
-                        print([sx1, sy1, sx2, sy2])
-                        if j > 0:
-                            seg_slope = abs((sy2-sy1)/(sx2-sx1))
+                        print([segx1, segy1, segx2, segy2])
+
+                        near_results = near(fleetptx, fleetpty, segx1, segy1, segx2, segy2)
+
+                        if near_results[2] < shortestDist: # decide whether to use the calculated Near value
+                            print('new shortest dist:')
+                            print(near_results)
+                            shortestDist = near_results[2]
+                            shortestDist_seg = [segx1, segy1, segx2, segy2]
+                            assocx = near_results[0]
+                            assocy = near_results[1]
                         else:
-                            seg_slope = 100
-                        print(seg_slope)
-                        assoc = ()
-                        if abs(slope_from_prev - seg_slope) < 0.1: # and dist_from_prev < .001
-                            # should really check the non-perpendicular distance every time as well
-                            if sqrt(pow(px - sx1, 2) + pow(py - sy1, 2)) < sqrt(pow(px - sx2, 2) + pow(py - sy2, 2)):
-                                dist = sqrt(pow(px - sx1, 2) + pow(py - sy1, 2))
-                                assoc = (sx1, sy1)
-                            else:
-                                dist = sqrt(pow(px - sx2, 2) + pow(py - sy2, 2))
-                                assoc = (sx2, sy2)
-                            if (sx1 < px < sx2) | (sx2 < px < sx1) | (sy1 < py < sy2) | (sy2 < py < sy1):
-                                assoc = perpendicular(px, py, sx1, sy1, sx2, sy2)
-                                print(assoc)
-                                dist2 = sqrt(pow(px-assoc[0],2) + pow(py-assoc[1],2))
-                                if dist2 < dist:
-                                    dist = dist2
-                            if 0 < dist < shortestDist: # dist is 0 when the point is out of bounds of the line
-                                shortestDist = dist
-                                shortestDist_seg = [sx1, sy1, sx2, sy2]
-                                assocx = assoc[0]
-                                assocy = assoc[1]
-                                print('new shortest dist:')
-                                print(shortestDist)
-                        else: # if the points don't have a similar slope, then consider its perpendicular separately
-                            if sqrt(pow(px - sx1, 2) + pow(py - sy1, 2)) < sqrt(pow(px - sx2, 2) + pow(py - sy2, 2)):
-                                dist = sqrt(pow(px - sx1, 2) + pow(py - sy1, 2))
-                                assoc = (sx1, sy1)
-                            else:
-                                dist = sqrt(pow(px - sx2, 2) + pow(py - sy2, 2))
-                                assoc = (sx2, sy2)
-                            if (sx1 < px < sx2) | (sx2 < px < sx1) | (sy1 < py < sy2) | (sy2 < py < sy1):
-                                assoc = perpendicular(px, py, sx1, sy1, sx2, sy2)
-                                print(assoc)
-                                dist2 = sqrt(pow(px-assoc[0],2) + pow(py-assoc[1],2))
-                                if dist2 < dist:
-                                    dist = dist2
-                            if 0 < dist < shortestDist_nonSlope: # dist is 0 when the point is out of bounds of the line
-                                shortestDist_nonSlope = dist
-                                shortestDist_seg_nonSlope = [sx1, sy1, sx2, sy2]
-                                assocx = assoc[0]
-                                assocy = assoc[1]
-                                print('new shortest dist:(non slope)')
-                                print(shortestDist_nonSlope)
+                            print('not shorter')
                         l += 1
                 else:
                     print('already checked segment')
                 k += 1
-        chosen = shortestDist
-        if chosen > 100: # there wasn't a centerline with a good slope
-            chosen = shortestDist_nonSlope
+
         print('chosen shortest dist:')
         print([assocx, assocy]) #print(shortestDist_seg)
         associations_list.append([assocx, assocy])
+        j += 1
 
+
+def write_associations():
+    path = csv_path(outfile)
+    f = open(path, 'w+')
+    header = 'id,runid,runid_sequence,vin,datetime,lon,lat,assoc_lon,assoc_lat\n'
+    f.write(header)
+    j=0
+    while j < len(fleetpoint_list):
         s = '%i,%i,%i,%s,%s,%f,%f,%f,%f\n' % (
             j,
             fleetpoint_list[j].runid,
@@ -225,14 +184,25 @@ def associate():
             str(fleetpoint_list[j].datetime),
             fleetpoint_list[j].lon,
             fleetpoint_list[j].lat,
-            assocx,
-            assocy
+            associations_list[j][0],
+            associations_list[j][1]
         )
         f.write(s)
         j += 1
     f.close()
 
+read_fleetpoints()
+read_centerlines()
+print('Finished reading input files. Now indexing centerlines')
+
+centerline_endpoints_map = defaultdict(list)
+centerline_endpoints_list = extract_centerline_points()
+tree = spatial.KDTree(centerline_endpoints_list)
+
+print('Finished indexing.  Now associating')
 
 associate()
 
+print('Finished associating. Now writing')
 
+write_associations()
