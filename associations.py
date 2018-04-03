@@ -11,7 +11,7 @@ from shapely.wkt import loads
 
 centerlines_file = 'centerline_shape_2272'
 fleetpoints_file = 'originals_feet'
-outfile = '3_29_18'
+outfile = '4_3_18'
 cwd = os.path.dirname(__file__)
 
 centerline_list = []
@@ -27,6 +27,7 @@ class CENTERLINE:
 
 class FLEETPOINT:
     def __init__(self, row):
+        self.id = int(row[0].strip())
         self.runid = int(row[1].strip())
         self.runid_sequence = int(row[2].strip())
         self.vin = row[3].strip()
@@ -90,18 +91,23 @@ def extract_centerline_points(): # maps each point that is a endpoint for a cent
 
 
 def near(fleetptx, fleetpty, segx1, segy1, segx2, segy2):
-
-    # if a perpendicular can be drawn within the end vertices of the line segment:
-    if (segx1 < fleetptx < segx2) | (segx2 < fleetptx < segx1) | (segy1 < fleetpty < segy2) | (segy2 < fleetpty < segy1):
-        if (segx2 == segx1):
-            segSlope = (segy2 - segy1) / 0.1
-        else:
-            segSlope = (segy2 - segy1) / (segx2 - segx1)
+    if segx2 == segx1:
+        assocx = segx1
+        assocy = fleetpty
+    elif segy2 == segy1:
+        assocx = fleetptx
+        assocy = segy1
+    else:
+        segSlope = (segy2 - segy1) / (segx2 - segx1)
         segB = segy2 - segSlope * segx2
         perpendicularSlope = -1 / segSlope
         pB = fleetpty - perpendicularSlope * fleetptx
         assocx = (segB - pB) / (perpendicularSlope - segSlope)
         assocy = perpendicularSlope * assocx + pB
+    # if a perpendicular can be drawn within the end vertices of the line segment:
+    if ((segx1 <= assocx <= segx2) & ((segy2 <= assocy <= segy1) | (segy1 <= assocy <= segy2))) | \
+            ((segx2 <= assocx <= segx1) & ((segy2 <= assocy <= segy1) | (segy1 <= assocy <= segy2))):
+        print('ok')
     else:
         if sqrt(pow(fleetptx - segx1, 2) + pow(fleetpty - segy1, 2)) < sqrt(pow(fleetptx - segx2, 2) + pow(fleetpty - segy2, 2)):
             assocx = segx1
@@ -116,6 +122,7 @@ def near(fleetptx, fleetpty, segx1, segy1, segx2, segy2):
 def associate():
     j = 0
     while j < len(fleetpoint_list):
+        #if j == 103:
         fleetptx = fleetpoint_list[j].lon
         fleetpty = fleetpoint_list[j].lat
         print([fleetptx, fleetpty])
