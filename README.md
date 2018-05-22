@@ -3,11 +3,7 @@
 ![](https://beta.phila.gov/media/20170531115900/oit-logo1.png)
 
 
-
-[TOCM]
-
-
-##Introduction
+## Introduction
 
 The city manages a fleet of garbage trucks that collect residential and commercial waste on a daily basis; these trucks are equipped with GPS tracking devices that collect information such as location and speed during the trucks' routes.  OIT aims to develop a real-time visual representation of a truck's location and route, providing assurance that a truck is efficiently collecting garbage and allowing departure/arrival time to be estimated.
 
@@ -15,13 +11,13 @@ The primary challenge to visualizing a truck's location is the limited quality o
 
 This guide documents the steps required to utilize OIT's map-matching algorithm.
 
-##Raw Data
+## Raw Data
 
 OIT collects GPS tracking information from active garbage trucks every 15 seconds using Verizon NetworkFleet.  The Esri GeoEvent Server receives the GPS data and this data is harvested every 5 minutes.
 
 The data collected from GeoEvent Server is exported to a CSV file, which is processed using Python script(s).  After associations, the resulting data and street centerline data are input to ArcMap for visualization.
 
-##Python Scripts
+## Python Scripts
 
 * **nf_tim1.py** is a preprocessing script, which entails sorting the data by truck ID, calculating distance and heading changes, and removing excess data points that represent idle time.
 * **associations.py** is a reproduction of Esri's Near geoprocessing function, computing the shortest distance point-to-line association for each GPS point.  According to Esri:
@@ -29,7 +25,7 @@ The data collected from GeoEvent Server is exported to a CSV file, which is proc
 
 * **weight_based_model.py** selects a set of candidate points as the map-matched route.  Weight-based models can provide a simple means of customizing the set of properties included in a scoring, the way the subscore is calculated for each property, and the relative weighting of each subscore in calculation of the total score.  This model scores all possible paths of candidate points for a given route, because the likelihood of a certain link being correct is partially dependent upon its relation to the preceding and following candidate links chosen.
 
-##Getting Started
+## Getting Started
 
 Place the CSV file in the same folder as the Python script or change the script's path.  Ensure that the CSV column fields match those in the script's class instantiations.  Run the script and an output CSV file will be created.  Files can be viewed in ArcMap as follows:
 
