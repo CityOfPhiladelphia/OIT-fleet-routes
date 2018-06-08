@@ -10,8 +10,8 @@ from shapely.wkt import loads
 
 
 centerlines_file = 'centerline_shape_2272'
-fleetpoints_file = 'originals_feet'
-outfile = '4_3_18'
+fleetpoints_file = 'XY06_01_originals_feet'
+outfile = 'new_near_06_01'
 cwd = os.path.dirname(__file__)
 
 centerline_list = []
@@ -32,8 +32,8 @@ class FLEETPOINT:
         self.runid_sequence = int(row[2].strip())
         self.vin = row[3].strip()
         self.datetime = row[4].strip()
-        self.lon = float(row[22])
-        self.lat = float(row[23])
+        self.lon = float(row[5])
+        self.lat = float(row[6])
         self.point = Point(self.lon, self.lat)
 
 
@@ -79,13 +79,25 @@ def read_fleetpoints(): # create a list of gps point objects from the csv file
     return
 
 
-def extract_centerline_points(): # maps each point that is a endpoint for a centerline segment to every centerline segment it is an endpoint for, and returns a list of all the points
+def extract_centerline_points():
     points = []
     for centerline in centerline_list:
         centerline_coords = list(centerline.linestring.coords)
-        for coord in centerline_coords:
-            centerline_endpoints_map[coord].append(centerline.linestring)
-        #print(map[coord])
+        l = 0
+        centerline_endpoints_map[centerline_coords[l][0],centerline_coords[l][1]].append(centerline.linestring)
+        while l < len(centerline_coords) - 1:  # consider each line that is a part of the current centerline LineString
+            segx1 = centerline_coords[l][0]
+            segy1 = centerline_coords[l][1]
+            segx2 = centerline_coords[l + 1][0]
+            segy2 = centerline_coords[l + 1][1]
+            if sqrt(pow(segx2 - segx1, 2) + pow(segy2 - segy1, 2)) > 500:
+                segx3 = min(segx1, segx2) + abs(segx1-segx2)/2
+                segy3 = min(segy1, segy2) + abs(segy1 - segy2) / 2
+                centerline_endpoints_map[segx3, segy3].append(centerline.linestring)
+                points.extend([(segx3, segy3)])
+            l += 1
+            centerline_endpoints_map[segx2, segy2].append(centerline.linestring)
+        # print(map[coord])
         points.extend(centerline_coords)
     return list(set(points))
 
@@ -126,7 +138,7 @@ def associate():
         fleetptx = fleetpoint_list[j].lon
         fleetpty = fleetpoint_list[j].lat
         print([fleetptx, fleetpty])
-        closest_centerline_coords = tree.query([fleetptx, fleetpty], 4)[1]  # query the tree for the 4 closest points to the gps point, returns their index in centerline_points
+        closest_centerline_coords = tree.query([fleetptx, fleetpty], 6)[1]  # query the tree for the 4 closest points to the gps point, returns their index in centerline_points
         checked_centerlines = set()  # keep track of the segments we have already considered for this particular point
         shortestDist = sys.float_info.max
         shortestDist_seg = 0
@@ -135,14 +147,17 @@ def associate():
 
         k = 0 #useful in print statements for keeping track of the coordinates we are checking
         for coord in closest_centerline_coords:
-            print('new candidate coordinate')
+            if j == 41:
+                print('coord',centerline_endpoints_list[coord])
+            #print('new candidate coordinate')
             linestrings = centerline_endpoints_map[centerline_endpoints_list[coord]]  # find the list of LineStrings that each coordinate is mapped to
+            #print(linestrings)
             for linestring in linestrings:
-                print(k)
-                print('current centerline:')
-                print(linestring)
+                #print(k)
+            #    print('current centerline:')
+            #    print(linestring)
                 if str(linestring) not in checked_centerlines:
-                    print('this centerline has not been checked yet')
+            #        print('this centerline has not been checked yet')
                     checked_centerlines.add(str(linestring))
                     l = 0
                     centerline_coords = list(linestring.coords)
@@ -151,14 +166,14 @@ def associate():
                         segy1 = centerline_coords[l][1]
                         segx2 = centerline_coords[l+1][0]
                         segy2 = centerline_coords[l+1][1]
-                        print('Segment:')
-                        print([segx1, segy1, segx2, segy2])
+             #           print('Segment:')
+                        #print([segx1, segy1, segx2, segy2])
 
                         near_results = near(fleetptx, fleetpty, segx1, segy1, segx2, segy2)
 
                         if near_results[2] < shortestDist: # decide whether to use the calculated Near value
-                            print('new shortest dist:')
-                            print(near_results)
+             #               print('new shortest dist:')
+                            #print(near_results)
                             shortestDist = near_results[2]
                             shortestDist_seg = [segx1, segy1, segx2, segy2]
                             assocx = near_results[0]
@@ -170,8 +185,8 @@ def associate():
                     print('already checked segment')
                 k += 1
 
-        print('chosen shortest dist:')
-        print([assocx, assocy]) #print(shortestDist_seg)
+       #print('chosen shortest dist:')
+        #print([assocx, assocy]) #print(shortestDist_seg)
         associations_list.append([assocx, assocy])
         j += 1
 
