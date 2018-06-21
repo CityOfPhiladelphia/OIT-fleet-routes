@@ -36,19 +36,21 @@ The data collected from GeoEvent Server is exported to a CSV file, which is proc
    - The LineStrings of all the centerlines in centerline_map are parsed to retrieve each centerline coordinate.  They are saved in centerline_endpoints_map so that we can have a mapping of coordinates to centerlines, and a complete list of these coordinates (the map keyset)
    - If any two points on a centerline LineString have a Euclidean distance of over 500 ft, we append the midpoint as an additional point on this centerline, so that the k-d tree will more accurately determine which gps points are close to this centerline.
 3. A **k-d tree** is made, indexing all of the centerline points, including the additional ones.  This is all the preprocessing needed before gps points can be looked at.
-4. **read_fleetpoints()**
+4. **preprocess_fleetpoints.run()** is called, to do the initial preprocessing script written a few months ago
+5. **read_fleetpoints()**
    - Read each row of the new fleetpoint csv and immediately process it, rather than reading and collecting all the rows and then processing them all together.
    - This was implemented as a way of simulating receiving the data in real-time.  We can imagine that read_fleetpoints will be called every 15 minutes or so when we receive a new csv.
    - a FLEETPOINT object is created for each data point, and stored in the ongoing list fleetpoints_list.  Then, we run identify_candidate_segments on the this point to determine the candidate associations to later choose from
    - **identify_candidate_segments()**
      * Queries the tree for the 6 centerline endpoints that are closest to the gps point (Euclidean distance).  For each of these endpoints, it considers each centerline that includes the endpoint.  It parses each centerline’s linestring and collects each sequential pair of linestring coordinates as a candidate segment.
      * For each of these candidate segments, it calculates the point on this segment line that is closest to the gps point (reproduction of Esri’s Near function).  It calculates the equation of a line perpendicular to the centerline segment that goes through the original gps point, and calculates where these two lines intersect as the association point.
-     * These points are stored in candidate_associations, where they are mapped to the id of the gps point.
-     * If, for some gps point, any of its associations are within a Euclidean distance of 75 feet from it, then we will no longer consider any associations that are over 250 feet away from it, because it is highly unlikely that such points would be a correct match.
+     * These candidate points are stored as CANDIDATE objects in candidate_associations, where they are mapped to the id of the gps point.
+     * If, for some gps point, any of its associations are within a Euclidean distance of 75 feet from it, then we will no longer consider any associations that are over 250 feet away from it, because it is highly unlikely that such points would be a correct match. (Saves time)
    - Once the list of candidate association points is generated for a gps point, we look at the current **sliding window** for its route.
      * If this point is the 1st, 2nd, 3rd, or 4th in its route, then we will wait for more points to be collected before selecting associations.  
      * If this point is the 5th in its route, we run init_path() to select associations for the first 3 gps points.  
      * If this point is 6th or greater in its route, we run continue_path() to select an association for the third to last (i.e. n-2) gps point in its route
+     * sp() is a method used by both init_path() and continue_path() to generate the candidate scores.
 5. **init_path()**
    - Begin by scoring all the candidate associations for the first gps point in the route, calling score_candidate.  The scoring is weight-based, meaning that each candidate is sub-scored on several factors, and the overall score is a sum of these sub-scores which are each given distinct weights based on their relative importance in making a correct selection.  The lower the overall score, the more likely a candidate is the correct selection.
    - For the first point in the route, the only factor considered is the candidate point’s distance from the gps point.  The scores are saved in path_dist.  
