@@ -11,11 +11,13 @@ The primary challenge to visualizing a truck's location is the limited quality o
 
 This guide documents the steps required to utilize OIT's map-matching algorithm.
 
-## Raw Data
+## Data Inputs
 
 OIT collects GPS tracking information from active garbage trucks every 15 seconds using Verizon NetworkFleet.  The Esri GeoEvent Server receives the GPS data and this data is harvested every 5 minutes.
 
 The data collected from GeoEvent Server is exported to a CSV file, which is processed using Python script(s).  After associations, the resulting data and street centerline data are input to ArcMap for visualization.
+
+Inputs include: vehicle id number (VIN), longitude/latitude, average speed, time stamp, street names, street segment topology
 
 ## Python Scripts
 
