@@ -10,7 +10,7 @@ from shapely.wkt import loads
 
 
 centerlines_file = 'centerline_shape_2272'
-fleetpoints_file = 'XY06_01_originals_feet'
+fleetpoints_file = 'jun_1_24h_route'
 outfile = 'new_near_06_01'
 cwd = os.path.dirname(__file__)
 

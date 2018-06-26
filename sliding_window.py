@@ -5,30 +5,31 @@ import csv
 import sys
 from math import sqrt, pow
 from shapely.wkt import loads
-from sortedcontainers import SortedDict
 
 import preprocess_fleetpts
 
-centerlines_file = 'centerline_shape_2272'
-topology_file = '6_15_18_topology'
-original_fleetpoints_file = '06_01'
-preprocessed_fleetpoints_file = 'did'  # 'XY06_01_originals_feet'
-outfile = '6_19_18_amb'
 cwd = os.path.dirname(__file__)
+centerlines_file = 'centerline_shape_2272'
+topology_file = 'roadnetwork_topology'
+original_fleetpoints_file = 'fleet_2018_06_01-00'
+preprocessed_fleetpoints_file = '06_01-00_processed'
+outfile = '6_01-00_assoc'
 
 centerline_map = defaultdict(list)  # centerline id -> centerline object
 centerline_endpoints_map = defaultdict(list)  # coordinates of point in centerline -> centerline object
+id_to_segpoints = defaultdict(list)  # id of segpoint -> segpoint object
 coord_to_segpoints = defaultdict(list)  # integer-casted coordinates (in case of rounding during processing) -> segpoint object
 
-fleetpoint_list = []
-candidate_associations = defaultdict(list)  # orig fleetpoint id -> list of candidate objects
-routes_list = defaultdict(list)  # route runid -> list of fleetpoint objects in route
-path_dist = defaultdict(list)  # coordinates of originals -> shortest dist
-pred = defaultdict(list)  # coordinates of originals -> predecessor
-scores = defaultdict(list)  # time -> list of scores
-associations_list = defaultdict(list)
+new_fleetpoint_list = []
+saved_fleetpoints = []  # imagine this is a list of fleetpoints from the previous call to this script (retrieved from geoeventserver), which still have to be matched to centerlines
+routes_list = defaultdict(list)  # route runid -> list of fleetpoint objects in route.  For real time this should be retrieved from geoeventserver and keys should be VIN
+candidate_associations = defaultdict(list)  # orig fleetpoint id -> list of candidate point objects
+path_dist = defaultdict(list)  # coordinate of original point -> lowest score among its candidate paths
+pred = defaultdict(list)  # coordinate of original point -> candidate object of predecessor on its best candidate path
+associations_list = defaultdict(list)  # route runid -> list of candidate objects that are chosen as matches for each point in route
 
 
+# represents a centerline segment (one row of centerline csv)
 class CENTERLINE:
     def __init__(self, row):
         self.linestring = loads(row[11])
@@ -36,21 +37,23 @@ class CENTERLINE:
         self.street_name = row[1].strip()
 
 
+# represents a point on one or more centerline segments, retrieved from csv's LINESTRING field
 class SEGPOINT:
     def __init__(self, row):
         self.segpoint_id = int(row[0])
         self.lon = float(row[1])
         self.lat = float(row[2])
-        self.in_segs = list(map(int, row[3].split(' ')))
+        self.in_segs = set(map(int, row[3].split(' ')))
         if row[4] != '':
             self.goes_to = list(map(int, row[4].split(' ')))
         else:
             self.goes_to = ''
 
 
+# represents a data point from NetworkFleet
 class FLEETPOINT:
-    def __init__(self, row):
-        self.id = int(row[0].strip())
+    def __init__(self, row, id):
+        self.id = id
         self.runid = int(row[1].strip())
         self.runid_sequence = int(row[2].strip())
         self.vin = row[3].strip()
@@ -59,6 +62,7 @@ class FLEETPOINT:
         self.lat = float(row[23])
 
 
+# represents a coordinate point that may be chosen as a matching for a fleetpoint
 class CANDIDATE:
     def __init__(self, assocx, assocy, dist, seg, origx, origy):
         self.assocx = assocx
@@ -73,14 +77,15 @@ def csv_path(file_name):
     return os.path.join(cwd, file_name + '.csv')
 
 
-def read_roadnetwork():  # create a list of centerline objects from the csv file
+# creates lists of centerline and segpoint objects from the csv files
+def read_roadnetwork():
     path = csv_path(centerlines_file)
     f = open(path, 'r')
     i = 0
     try:
         reader = csv.reader(f)
         for row in reader:
-            if i == 0:  # because the first row contains the header
+            if i == 0:  # first row contains the header
                 i += 1
                 continue
             r = CENTERLINE(row)
@@ -100,7 +105,13 @@ def read_roadnetwork():  # create a list of centerline objects from the csv file
                 i += 1
                 continue
             r = SEGPOINT(row)
-            coord_to_segpoints[int(r.lon), int(r.lat)] = r
+            id_to_segpoints[r.segpoint_id] = r
+            # if two points have same integer casting, merge their connectivity
+            if coord_to_segpoints[int(r.lon), int(r.lat)]:
+                coord_to_segpoints[int(r.lon), int(r.lat)].in_segs.union(r.in_segs)
+                coord_to_segpoints[int(r.lon), int(r.lat)].goes_to.extend(r.goes_to)
+            else:
+                coord_to_segpoints[int(r.lon), int(r.lat)] = r
             i += 1
     except IOError:
         print('Error opening ' + path, sys.exc_info()[0])
@@ -115,13 +126,14 @@ def extract_centerline_points():
         centerline_coords = list(centerline.linestring.coords)
         l = 0
         centerline_endpoints_map[centerline_coords[l][0], centerline_coords[l][1]].append(centerline)
-        while l < len(centerline_coords) - 1:  # consider each line that is a part of the current centerline LineString
+        # traverse each sequential pair of points in the LineString, as forming separate lines
+        while l < len(centerline_coords) - 1:
             segx1 = centerline_coords[l][0]
             segy1 = centerline_coords[l][1]
             segx2 = centerline_coords[l + 1][0]
             segy2 = centerline_coords[l + 1][1]
-            if sqrt(pow(segx2 - segx1, 2) + pow(segy2 - segy1,
-                                                2)) > 500:  # if a piece of the centerline is longer than 500ft, include an intermediate point
+            # if this piece of the centerline is longer than 500ft, create an intermediate point
+            if sqrt(pow(segx2 - segx1, 2) + pow(segy2 - segy1, 2)) > 500:
                 segx3 = min(segx1, segx2) + abs(segx1 - segx2) / 2
                 segy3 = min(segy1, segy2) + abs(segy1 - segy2) / 2
                 centerline_endpoints_map[segx3, segy3].append(centerline)
@@ -131,11 +143,15 @@ def extract_centerline_points():
     return list(centerline_endpoints_map.keys())
 
 
-# simulates receiving data points one at a time.
+# simulates receiving a batch of data points
 def read_fleetpoints():
     path = csv_path(preprocessed_fleetpoints_file)
     f = open(path, 'r')
     i = 0
+    if len(saved_fleetpoints) == 0:
+        id = 0
+    # else:
+        # retrieve id of most recent timestamp fleetpoint, and increment by 1
     try:
         reader = csv.reader(f)
         for row in reader:
@@ -143,12 +159,11 @@ def read_fleetpoints():
                 i += 1
                 continue
             # create a gps point object from the csv row
-            # if row[3].strip() == '1HTWGAAT96J346882':
-            r = FLEETPOINT(row)
-            fleetpoint_list.append(r)
+            r = FLEETPOINT(row, id)
+            new_fleetpoint_list.append(r)
 
-            # identify potential centerline segment mappings based on coordinate
-            identify_candidate_segs(r.lon, r.lat, r.id)
+            # identify potential centerline segment mappings based on lat/lon
+            identify_candidate_segs(r.lon, r.lat, id)
 
             # perform sliding window function based on the number of points that have already been collected for this route
             if r.runid in routes_list:
@@ -160,6 +175,8 @@ def read_fleetpoints():
                     continue_path(route)
             else:
                 routes_list[r.runid].append(r)
+
+            id += 1
             i += 1
     except IOError:
         print('Error opening ' + path, sys.exc_info()[0])
@@ -167,38 +184,38 @@ def read_fleetpoints():
     return
 
 
-# identify potential centerline segment mappings based on coordinate
+# identify potential centerline segment matchings based on coordinate
 def identify_candidate_segs(fleetptx, fleetpty, fleetpt_id):
     candidate_segs = []
-    closest_coords_indices = tree.query([fleetptx, fleetpty], k=6)[
-        1]  # query the tree for the 6 closest points to the gps point, returns their index in centerline_points
     checked_centerlines = set()  # keep track of the segments we have already considered for this particular point
+
+    # query the tree for the 6 closest points to the gps point, returns their index in centerline_endpoints_list
+    closest_coords_indices = tree.query([fleetptx, fleetpty], k=6)[1]
+
     for coord_index in closest_coords_indices:
-        # print('new candidate coordinate')
         if coord_index != len(centerline_endpoints_list):  # else indicates fewer than 6 points returned
-            candidate_centerlines = centerline_endpoints_map[
-                centerline_endpoints_list[coord_index]]  # find the list of centerlines that each coordinate is mapped to
+            # get the list of centerlines that include this coordinate
+            candidate_centerlines = centerline_endpoints_map[centerline_endpoints_list[coord_index]]
+
             for centerline in candidate_centerlines:
-                seg_id = centerline.seg_id
-                # print('current centerline:', linestring)
-                if seg_id not in checked_centerlines:
-                    # print('this centerline has not been checked yet')
-                    checked_centerlines.add(seg_id)
+                centerline_id = centerline.seg_id
+                if centerline_id not in checked_centerlines:
+                    checked_centerlines.add(centerline_id)
                     centerline_coords = list(centerline.linestring.coords)
                     l = 0
-                    while l < len(centerline_coords) - 1:  # consider each line that is a part of the current centerline LineString
+                    while l < len(centerline_coords) - 1:  # each line within this centerline's LineString becomes a candidate
                         segx1 = centerline_coords[l][0]
                         segy1 = centerline_coords[l][1]
                         segx2 = centerline_coords[l + 1][0]
                         segy2 = centerline_coords[l + 1][1]
-                        candidate_segs.append([segx1, segy1, segx2, segy2, seg_id])
+                        candidate_segs.append([segx1, segy1, segx2, segy2, centerline_id])
                         l += 1
-                # print('already checked segment')
 
-    # if we have potential mappings within 75 ft of original coordinate, do not consider potentials that are over 250 ft away from original
+    # Use Near to calculate lat/lon of candidate points.
+    # If any of these are within 75 ft of original coordinate, get rid of candidates that are over 250 ft away from original
     within_75 = False
-    for candidate in candidate_segs:
-        near_results = near(fleetptx, fleetpty, candidate)
+    for seg in candidate_segs:
+        near_results = near(fleetptx, fleetpty, seg)
         if near_results.near_dist <= 75:
             within_75 = True
         candidate_associations[fleetpt_id].append(near_results)
@@ -219,6 +236,8 @@ def near(fleetptx, fleetpty, seg):
     segx2 = seg[2]
     segy2 = seg[3]
     seg_id = seg[4]
+
+    # check if segment has the same lat or lon for both endpoints
     if segx2 == segx1:
         assocx = segx1
         assocy = fleetpty
@@ -232,8 +251,8 @@ def near(fleetptx, fleetpty, seg):
         pB = fleetpty - perpendicularSlope * fleetptx
         assocx = (segB - pB) / (perpendicularSlope - segSlope)
         assocy = perpendicularSlope * assocx + pB
-    # if a perpendicular can be drawn within the end vertices of the line segment:
-    if not (((segx1 <= assocx <= segx2) & ((segy2 <= assocy <= segy1) | (segy1 <= assocy <= segy2))) | \
+    # if a perpendicular cannot be drawn within the end vertices of the line segment:
+    if not (((segx1 <= assocx <= segx2) & ((segy2 <= assocy <= segy1) | (segy1 <= assocy <= segy2))) |
             ((segx2 <= assocx <= segx1) & ((segy2 <= assocy <= segy1) | (segy1 <= assocy <= segy2)))):
         if sqrt(pow(fleetptx - segx1, 2) + pow(fleetpty - segy1, 2)) < sqrt(pow(fleetptx - segx2, 2) + pow(fleetpty - segy2, 2)):
             assocx = segx1
@@ -241,24 +260,26 @@ def near(fleetptx, fleetpty, seg):
         else:
             assocx = segx2
             assocy = segy2
+
     dist = sqrt(pow(fleetptx - assocx, 2) + pow(fleetpty - assocy, 2))
     return CANDIDATE(assocx, assocy, dist, seg_id, fleetptx, fleetpty)
 
 
-def score_candidate(previous, current=None):
-    if current is None:
-        if previous.near_dist / 160 > 1:
-            score = 1
-        else:
-            score = previous.near_dist / 160
+# scores current candidate point on several factors, including its likelihood of coming after this previous candidate point (if not first in route)
+def score_candidate(current, previous=None):
+    # score Near distance of the current point
+    if current.near_dist / 160 > 1:
+        emiss = 1
+    else:
+        emiss = current.near_dist / 160
+
+    # if first point in route, score based on Near distance only
+    if previous is None:
+        return emiss
     else:
         previous_centerline = centerline_map[previous.seg_id]
         current_centerline = centerline_map[current.seg_id]
-        # score the next candidate point based on Near distance
-        if current.near_dist / 160 > 1:
-            emiss = 1
-        else:
-            emiss = current.near_dist / 160
+
         # score the selection of both the current and next point based on Euclidean distance
         trans_dist = sqrt(pow(previous.assocx - current.assocx, 2) + pow(previous.assocy - current.assocy, 2))
         orig_dist = sqrt(pow(previous.origx - current.origx, 2) + pow(previous.origy - current.origy, 2))
@@ -266,25 +287,35 @@ def score_candidate(previous, current=None):
             trans_dist = 1
         else:
             trans_dist = trans_dist / 750
-        if previous_centerline.street_name == current_centerline.street_name:
-            trans_dist -= 0.25
-        previous_pts = list(previous_centerline.linestring.coords)
-        previous_pts = [coord_to_segpoints[int(previous_pts[0][0]), int(previous_pts[0][1])],
-                        coord_to_segpoints[int(previous_pts[len(previous_pts) - 1][0]), int(previous_pts[len(previous_pts) - 1][1])]]
-        current_pts = list(current_centerline.linestring.coords)
-        current_pts = [coord_to_segpoints[int(current_pts[0][0]), int(current_pts[0][1])].segpoint_id,
-                       coord_to_segpoints[int(current_pts[len(current_pts) - 1][0]), int(current_pts[len(current_pts) - 1][1])].segpoint_id]
+
+        # improve the score if the points are on the same street
+        #if previous_centerline.street_name == current_centerline.street_name:
+        #    trans_dist -= 0.25
+
+        # improve the score if the next point is on a segment that can be reached within one or two hops from the current point
+        previous_endpts = list(previous_centerline.linestring.coords)
+        previous_endpts = [coord_to_segpoints[int(previous_endpts[0][0]), int(previous_endpts[0][1])],
+                        coord_to_segpoints[int(previous_endpts[len(previous_endpts) - 1][0]), int(previous_endpts[len(previous_endpts) - 1][1])]]
+        current_endpts = list(current_centerline.linestring.coords)
+        current_endpts = [coord_to_segpoints[int(current_endpts[0][0]), int(current_endpts[0][1])].segpoint_id,
+                       coord_to_segpoints[int(current_endpts[len(current_endpts) - 1][0]), int(current_endpts[len(current_endpts) - 1][1])].segpoint_id]
         connected = False
-        for previous_pt in previous_pts:
+        for previous_pt in previous_endpts:
             for seg in previous_pt.goes_to:
-                if seg in current_pts:
+                if seg in current_endpts:
                     connected = True
+                else:
+                    for next_seg in id_to_segpoints[seg].goes_to:
+                        if next_seg in current_endpts:
+                            connected = True
         if connected:
             trans_dist -= 0.25
-        score = emiss + trans_dist
-    return score
+
+        return emiss + trans_dist
 
 
+# scores all candidates for a given point (time represented by fleetpoint id) trying all combinations of previous and current points.
+# The best score for the last fleetpoint corresponds to the best path of candidates
 def sp(start_time, end_time, scored=False):
     if not scored:
         # find shortest path for each candidate point from 2nd original to final original
@@ -293,8 +324,7 @@ def sp(start_time, end_time, scored=False):
             for previous in candidate_associations[time]:
                 # print('CURRENT', previous.assocx, previous.assocy, path_dist[previous.assocx, previous.assocy, time])
                 for current in candidate_associations[time + 1]:
-                    score = score_candidate(previous, current)
-                    scores[time+1].append(score)
+                    score = score_candidate(current, previous)
                     # if the path to the next point using current point is the shortest thus far for this next point, use it
                     if path_dist[current.assocx, current.assocy, time + 1] > path_dist[previous.assocx, previous.assocy, time] + score:
                         path_dist[current.assocx, current.assocy, time + 1] = path_dist[previous.assocx, previous.assocy, time] + score
@@ -305,35 +335,37 @@ def sp(start_time, end_time, scored=False):
     # find shortest distance among all candidates of last original point; this corresponds to shortest overall path so far
     final_score = sys.float_info.max
     current_pred = []
-    for c in candidate_associations[end_time]:
-        sc = path_dist[c.assocx, c.assocy, end_time]
-        if sc < final_score:
-            current_pred = c
-            final_score = sc
+    for candidate in candidate_associations[end_time]:
+        score = path_dist[candidate.assocx, candidate.assocy, end_time]
+        if score < final_score:
+            current_pred = candidate
+            final_score = score
     return current_pred
 
 
+# scores points on a route for the first time
 def init_path(route):
     start_time = route[0].id
     end_time = start_time + len(route) - 1
     associations = []
 
+    # initialize all scores to high number
     i = start_time + 1
     while i <= end_time:
-        for c in candidate_associations[i]:
-            path_dist[c.assocx, c.assocy, i] = sys.float_info.max
+        for candidate in candidate_associations[i]:
+            path_dist[candidate.assocx, candidate.assocy, i] = sys.float_info.max
         i += 1
 
     # candidate points for the first original are scored only by the Near distance
-    for c in candidate_associations[start_time]:
-        path_dist[c.assocx, c.assocy, start_time] = score_candidate(c)
-        scores[start_time].append(score_candidate(c))
+    for candidate in candidate_associations[start_time]:
+        path_dist[candidate.assocx, candidate.assocy, start_time] = score_candidate(candidate)
 
+    # score the rest of the candidate points and return best path of candidates
     current_pred = sp(start_time, end_time)
     time = end_time
 
     # retrieve all candidates on this shortest path
-    if end_time - start_time == 4:  # if there are 5 points, we will start by matching the first 3
+    if end_time - start_time == 4:  # if there are 5 points in the route, we will start by matching only the first 3
         while time > start_time:
             current_pred = pred[current_pred.assocx, current_pred.assocy, time]
             if time <= start_time + 3:
@@ -354,10 +386,12 @@ def continue_path(route):
     start_time = route[len(route) - 1].id - 3
     end_time = route[len(route) - 1].id
 
+    # reset scores for points 3 and 4, initialize score for point 5
     for i in [1, 2, 3]:
         for c in candidate_associations[start_time + i]:
             path_dist[c.assocx, c.assocy, start_time + i] = sys.float_info.max
 
+    # score candidates for these points
     current_pred = sp(start_time, end_time)
     time = end_time
 
@@ -391,34 +425,24 @@ def finish_paths():
 def write_associations():
     path = csv_path(outfile)
     f = open(path, 'w+')
-    header = 'id,runid,runid_sequence,vin,datetime,lon,lat,assoc_lon,assoc_lat,assoc_seg_id,ambiguity\n'
+    header = 'id,runid,runid_sequence,vin,datetime,lon,lat,assoc_lon,assoc_lat,assoc_seg_id\n'
     f.write(header)
     run_id = 0
     j = 0
     while run_id < len(associations_list):
         route = associations_list[run_id]
         for assoc in route:
-            print(fleetpoint_list[j].id)
-            print(scores[fleetpoint_list[j].id])
-            s = sorted(scores[fleetpoint_list[j].id])
-            #print(s)
-            if s[1] - s[0] < 0.25:
-                print('True')
-            else:
-                print('False')
-            # print('assoc', assoc)
-            s = '%i,%i,%i,%s,%s,%f,%f,%f,%f,%s,%s\n' % (
+            s = '%i,%i,%i,%s,%s,%f,%f,%f,%f,%s\n' % (
                 j,
-                fleetpoint_list[j].runid,
-                fleetpoint_list[j].runid_sequence,
-                fleetpoint_list[j].vin,
-                str(fleetpoint_list[j].datetime),
-                fleetpoint_list[j].lon,
-                fleetpoint_list[j].lat,
+                new_fleetpoint_list[j].runid,
+                new_fleetpoint_list[j].runid_sequence,
+                new_fleetpoint_list[j].vin,
+                str(new_fleetpoint_list[j].datetime),
+                new_fleetpoint_list[j].lon,
+                new_fleetpoint_list[j].lat,
                 assoc.assocx,
                 assoc.assocy,
                 assoc.seg_id,
-                scores[j]
             )
             f.write(s)
             j += 1
@@ -426,14 +450,15 @@ def write_associations():
     f.close()
 
 
-# Centerline data preprocessing
+# EXECUTION
 read_roadnetwork()
 centerline_endpoints_list = extract_centerline_points()
 tree = spatial.KDTree(centerline_endpoints_list)
 print('Finished preprocessing road network.  Now preprocessing Verizon data')
 
-# preprocess_fleetpts.run(original_fleetpoints_file, preprocessed_fleetpoints_file)
+preprocess_fleetpts.run(original_fleetpoints_file, preprocessed_fleetpoints_file)
 print('Finished preprocessing Verizon data. Now simulating real-time association')
+
 
 read_fleetpoints()
 # at whatever point we determine it is time to "close off" a path, run finish_paths().  Here it is when there are no more data points to read.
@@ -442,4 +467,3 @@ finish_paths()
 print('Finished simulation. Now writing')
 
 write_associations()
-associations_list.clear()
